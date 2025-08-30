@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 
 export async function POST(request: NextRequest) {
   try {
-    const { requirements, targetScore = 85, maxIterations = 3 } = await request.json()
+    const { requirements, targetScore = 85 } = await request.json()
 
     if (!requirements?.trim()) {
       return NextResponse.json(
@@ -11,7 +11,7 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    console.log('🚀 反復改善システム開始', `(目標: ${targetScore}点, 最大: ${maxIterations}回)`)
+    console.log('🚀 順次改善システム開始', `(目標: ${targetScore}点)`)
 
     // 環境変数
     const endpoint = process.env.AZURE_OPENAI_ENDPOINT
@@ -29,516 +29,702 @@ export async function POST(request: NextRequest) {
     let currentBicep = await generateInitialBicep(requirements, endpoint, apiKey, deployment)
     let currentArchitecture = await generateArchitecture(requirements, endpoint, apiKey, deployment)
 
-    const iterationHistory = []
-    let iteration = 1
+    // 2. 各エージェントによる評価のみ
+    console.log('🔄 4エージェント評価開始')
 
-    while (iteration <= maxIterations) {
-      console.log(`🔄 改善イテレーション ${iteration}/${maxIterations} 開始`)
+    // 2.1 セキュリティエージェント評価
+    console.log('🔒 セキュリティエージェント評価中...')
+    const securityEvaluation = await evaluateWithAgent(currentBicep, currentArchitecture, getSecurityPrompt(), endpoint, apiKey, deployment, "セキュリティ")
+    
+    console.log('⏳ レート制限対応のため10秒待機中...')
+    await new Promise(resolve => setTimeout(resolve, 10000))
 
-      // 2. 4エージェント評価（順次実行でレート制限回避）
-      const evaluations = await evaluateWithAllAgentsSequential(currentBicep, currentArchitecture, endpoint, apiKey, deployment)
+    // 2.2 パフォーマンスエージェント評価
+    console.log('⚡ パフォーマンスエージェント評価中...')
+    const performanceEvaluation = await evaluateWithAgent(currentBicep, currentArchitecture, getPerformancePrompt(), endpoint, apiKey, deployment, "パフォーマンス")
+    
+    console.log('⏳ レート制限対応のため10秒待機中...')
+    await new Promise(resolve => setTimeout(resolve, 10000))
 
-      // 3. スコア計算
-      const totalScore = evaluations.security.score + evaluations.performance.score + evaluations.reliability.score + evaluations.cost.score
+    // 2.3 信頼性エージェント評価
+    console.log('🛡️ 信頼性エージェント評価中...')
+    const reliabilityEvaluation = await evaluateWithAgent(currentBicep, currentArchitecture, getReliabilityPrompt(), endpoint, apiKey, deployment, "信頼性")
+    
+    console.log('⏳ レート制限対応のため10秒待機中...')
+    await new Promise(resolve => setTimeout(resolve, 10000))
 
-      console.log(`📊 現在のスコア: ${totalScore}点 (目標: ${targetScore}点)`)
+    // 2.4 コスト最適化エージェント評価
+    console.log('💰 コスト最適化エージェント評価中...')
+    const costEvaluation = await evaluateWithAgent(currentBicep, currentArchitecture, getCostPrompt(), endpoint, apiKey, deployment, "コスト最適化")
 
-      // イテレーション履歴に記録
-      iterationHistory.push({
-        iteration,
-        totalScore,
-        securityScore: evaluations.security.score,
-        performanceScore: evaluations.performance.score,
-        reliabilityScore: evaluations.reliability.score,
-        costScore: evaluations.cost.score,
-        changes: iteration === 1 ? '初期生成' : '前回からの改善適用'
-      })
-
-      // 4. 目標スコア達成判定
-      if (totalScore >= targetScore) {
-        console.log('🎉 目標スコア達成！')
-        const finalMermaid = await generateMermaidFromBicep(currentBicep, endpoint, apiKey, deployment)
-        
-        return NextResponse.json({
-          success: true,
-          finalBicep: currentBicep,
-          finalArchitecture: finalMermaid,
-          finalScore: {
-            total: totalScore,
-            security: evaluations.security.score,
-            performance: evaluations.performance.score,
-            reliability: evaluations.reliability.score,
-            cost: evaluations.cost.score
-          },
-          iterationHistory,
-          detailedEvaluations: evaluations,
-          targetScore,
-          maxIterations,
-          completedIterations: iteration
-        })
+    // 3. 評価結果まとめ
+    const evaluationResults = [
+      {
+        agent: 'セキュリティ',
+        score: securityEvaluation.score,
+        issues: securityEvaluation.issues
+      },
+      {
+        agent: 'パフォーマンス',
+        score: performanceEvaluation.score,
+        issues: performanceEvaluation.issues
+      },
+      {
+        agent: '信頼性',
+        score: reliabilityEvaluation.score,
+        issues: reliabilityEvaluation.issues
+      },
+      {
+        agent: 'コスト最適化',
+        score: costEvaluation.score,
+        issues: costEvaluation.issues
       }
+    ]
 
-      // 5. 最大イテレーション達成判定
-      if (iteration >= maxIterations) {
-        console.log('⏰ 最大イテレーション数に到達')
-        break
-      }
-
-      // 6. Bicep改善
-      const improvements = [
-        ...evaluations.security.issues.map((issue: any) => `セキュリティ: ${issue.improvement || issue.description}`),
-        ...evaluations.performance.issues.map((issue: any) => `パフォーマンス: ${issue.improvement || issue.description}`),
-        ...evaluations.reliability.issues.map((issue: any) => `信頼性: ${issue.improvement || issue.description}`),
-        ...evaluations.cost.issues.map((issue: any) => `コスト: ${issue.improvement || issue.description}`)
-      ].join('\n')
-
-      if (improvements.trim()) {
-        console.log('🔧 Bicep改善中...')
-        currentBicep = await improveBicep(currentBicep, improvements, endpoint, apiKey, deployment)
-      }
-
-      // イテレーション終了時にレート制限回避のため30秒待機
-      if (iteration < maxIterations) {
-        console.log('⏳ 次のイテレーションまで30秒待機中（レート制限回避）...')
-        await new Promise(resolve => setTimeout(resolve, 30000))
-      }
-
-      iteration++
+    // 初期スコア計算
+    const initialScore = {
+      security: securityEvaluation.score,
+      performance: performanceEvaluation.score,
+      reliability: reliabilityEvaluation.score,
+      cost: costEvaluation.score,
+      total: securityEvaluation.score + performanceEvaluation.score + reliabilityEvaluation.score + costEvaluation.score
     }
 
-    // 最大イテレーション達成時の処理
-    const finalMermaid = await generateMermaidFromBicep(currentBicep, endpoint, apiKey, deployment)
-    const finalEvaluations = await evaluateWithAllAgentsSequential(currentBicep, currentArchitecture, endpoint, apiKey, deployment)
-    const finalTotalScore = finalEvaluations.security.score + finalEvaluations.performance.score + finalEvaluations.reliability.score + finalEvaluations.cost.score
+    // 4. 統合改善エージェント（MVP A+B）
+    console.log('� 統合改善エージェント実行中...')
+    const integrationResult = await integratedImprovementAgent(
+      currentBicep, 
+      currentArchitecture,
+      evaluationResults,
+      endpoint, 
+      apiKey, 
+      deployment
+    )
+
+    // 5. 最終スコア計算（改善後）
+    console.log('📊 改善後スコア計算中...')
+    const improvedScore = integrationResult.improvedBicep ? 
+      await calculateFinalScore(integrationResult.improvedBicep, currentArchitecture, endpoint, apiKey, deployment) :
+      initialScore
+
+    console.log(`🎯 改善前スコア: ${initialScore.total}点`)
+    console.log(`🎯 改善後スコア: ${improvedScore.total}点 (${improvedScore.total - initialScore.total > 0 ? '+' : ''}${improvedScore.total - initialScore.total}点)`)
+
+    // 6. 最終アーキテクチャ図生成（レート制限対策）
+    console.log('⏳ Mermaid生成前に10秒待機中...')
+    await new Promise(resolve => setTimeout(resolve, 10000))
+    
+    const finalMermaid = await generateMermaidFromBicep(
+      integrationResult.improvedBicep || currentBicep, 
+      endpoint, 
+      apiKey, 
+      deployment
+    )
 
     return NextResponse.json({
       success: true,
-      finalBicep: currentBicep,
+      finalBicep: integrationResult.improvedBicep || currentBicep,
       finalArchitecture: finalMermaid,
-      finalScore: {
-        total: finalTotalScore,
-        security: finalEvaluations.security.score,
-        performance: finalEvaluations.performance.score,
-        reliability: finalEvaluations.reliability.score,
-        cost: finalEvaluations.cost.score
+      initialScore,
+      finalScore: improvedScore,
+      improvement: integrationResult,
+      evaluationResults,
+      detailedEvaluations: {
+        security: securityEvaluation,
+        performance: performanceEvaluation,
+        reliability: reliabilityEvaluation,
+        cost: costEvaluation
       },
-      iterationHistory,
-      detailedEvaluations: finalEvaluations,
       targetScore,
-      maxIterations,
-      completedIterations: iteration - 1
+      // 改善提案（全エージェントの課題を統合）
+      improvementSuggestions: {
+        allIssues: [
+          ...securityEvaluation.issues.map((issue: any) => ({ ...issue, category: 'セキュリティ' })),
+          ...performanceEvaluation.issues.map((issue: any) => ({ ...issue, category: 'パフォーマンス' })),
+          ...reliabilityEvaluation.issues.map((issue: any) => ({ ...issue, category: '信頼性' })),
+          ...costEvaluation.issues.map((issue: any) => ({ ...issue, category: 'コスト最適化' }))
+        ],
+        summary: integrationResult.summary || "統合改善エージェントによる分析が完了しました。"
+      }
     })
 
   } catch (error) {
-    console.error('反復改善システムエラー:', error)
+    console.error('エラー:', error)
     return NextResponse.json(
-      { error: `反復改善システムエラー: ${error instanceof Error ? error.message : '不明なエラー'}` },
+      { error: error instanceof Error ? error.message : '処理中にエラーが発生しました' },
       { status: 500 }
     )
   }
 }
 
-async function generateInitialBicep(requirements: string, endpoint: string, apiKey: string, deployment: string): Promise<string> {
+// 新しいimproveWithAgent関数
+async function improveWithAgent(
+  bicep: string, 
+  architecture: string, 
+  agentPrompt: string, 
+  endpoint: string, 
+  apiKey: string, 
+  deployment: string, 
+  agentName: string
+) {
   try {
-    const response = await fetch(`${endpoint}/openai/deployments/${deployment}/chat/completions?api-version=2024-08-01-preview`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'api-key': apiKey,
-      },
-      body: JSON.stringify({
-        messages: [
-          {
-            role: 'system',
-            content: 'あなたはAzure Bicepテンプレートの専門家です。要件に基づいて高品質なBicepテンプレートを生成してください。'
-          },
-          {
-            role: 'user',
-            content: `以下の要件に基づいてBicepテンプレートを生成してください：\n\n${requirements}`
-          }
-        ],
-        max_tokens: 2000,
-        temperature: 0.2,
-      }),
-    })
-
-    const data = await response.json()
-    return data.choices?.[0]?.message?.content || 'Bicep生成エラー'
-  } catch (error) {
-    console.error('初期Bicep生成エラー:', error)
-    return 'Bicep生成エラー'
-  }
-}
-
-async function generateArchitecture(requirements: string, endpoint: string, apiKey: string, deployment: string): Promise<string> {
-  try {
-    const response = await fetch(`${endpoint}/openai/deployments/${deployment}/chat/completions?api-version=2024-08-01-preview`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'api-key': apiKey,
-      },
-      body: JSON.stringify({
-        messages: [
-          {
-            role: 'system',
-            content: 'あなたはAzureアーキテクチャ図の専門家です。Mermaid形式でアーキテクチャ図を生成してください。'
-          },
-          {
-            role: 'user',
-            content: `以下の要件に基づいてMermaid形式のアーキテクチャ図を生成してください：\n\n${requirements}`
-          }
-        ],
-        max_tokens: 1500,
-        temperature: 0.2,
-      }),
-    })
-
-    const data = await response.json()
-    return data.choices?.[0]?.message?.content || 'flowchart TD\n    A[アーキテクチャ図生成エラー]'
-  } catch (error) {
-    console.error('アーキテクチャ生成エラー:', error)
-    return 'flowchart TD\n    A[アーキテクチャ図生成エラー]'
-  }
-}
-
-async function evaluateWithAllAgentsSequential(bicep: string, architecture: string, endpoint: string, apiKey: string, deployment: string) {
-  try {
-    console.log('📊 セキュリティエージェント実行中...')
-    const securityEval = await evaluateWithAgent(bicep, architecture, getSecurityPrompt(), endpoint, apiKey, deployment, "セキュリティ")
+    // 1. 初回エージェントによる評価
+    const initialEvaluation = await evaluateWithAgent(bicep, architecture, agentPrompt, endpoint, apiKey, deployment, agentName)
     
-    // エージェント間の待機時間（レート制限対策）
-    console.log('⏳ 10秒待機中...')
-    await new Promise(resolve => setTimeout(resolve, 10000))
+    // 2. 改善提案の抽出
+    const improvements = initialEvaluation.issues.map((issue: any) => issue.improvement || issue.description).join('\n')
     
-    console.log('📊 パフォーマンスエージェント実行中...')
-    const performanceEval = await evaluateWithAgent(bicep, architecture, getPerformancePrompt(), endpoint, apiKey, deployment, "パフォーマンス")
+    // 3. Bicep改善（改善提案がある場合のみ）
+    let improvedBicep = bicep
+    let finalEvaluation = initialEvaluation
     
-    console.log('⏳ 10秒待機中...')
-    await new Promise(resolve => setTimeout(resolve, 10000))
+    if (improvements.trim()) {
+      console.log(`🔧 ${agentName}エージェントによるBicep改善中...`)
+      improvedBicep = await improveBicep(bicep, improvements, endpoint, apiKey, deployment)
+      
+      // 4. 改善後の再評価
+      console.log(`📊 ${agentName}エージェント改善後評価中...`)
+      finalEvaluation = await evaluateWithAgent(improvedBicep, architecture, agentPrompt, endpoint, apiKey, deployment, agentName)
+    }
     
-    console.log('📊 信頼性エージェント実行中...')
-    const reliabilityEval = await evaluateWithAgent(bicep, architecture, getReliabilityPrompt(), endpoint, apiKey, deployment, "信頼性")
-    
-    console.log('⏳ 10秒待機中...')
-    await new Promise(resolve => setTimeout(resolve, 10000))
-    
-    console.log('📊 コスト最適化エージェント実行中...')
-    const costEval = await evaluateWithAgent(bicep, architecture, getCostPrompt(), endpoint, apiKey, deployment, "コスト最適化")
-
     return {
-      security: securityEval,
-      performance: performanceEval,
-      reliability: reliabilityEval,
-      cost: costEval
+      improvedBicep,
+      evaluation: finalEvaluation,
+      improvements,
+      initialScore: initialEvaluation.score,
+      finalScore: finalEvaluation.score
     }
   } catch (error) {
-    console.error('エージェント評価エラー:', error)
-    // フォールバック評価を返す
-    return {
-      security: { score: 15, issues: [], strengths: [] },
-      performance: { score: 15, issues: [], strengths: [] },
-      reliability: { score: 15, issues: [], strengths: [] },
-      cost: { score: 15, issues: [], strengths: [] }
-    }
+    console.error(`${agentName}エージェントエラー:`, error)
+    throw error
   }
 }
 
-async function evaluateWithAgent(bicep: string, architecture: string, prompt: string, endpoint: string, apiKey: string, deployment: string, agentName: string) {
+// 既存の関数群（変更なし）
+async function generateInitialBicep(requirements: string, endpoint: string, apiKey: string, deployment: string) {
+  const messages = [
+    {
+      role: "system",
+      content: `あなたはAzure Bicepの専門家です。与えられた要件に基づいて、本番環境対応の高品質なBicepテンプレートを生成してください。
+
+重要なガイドライン:
+1. Azure Well-Architected Framework に準拠
+2. セキュリティベストプラクティスの適用
+3. 適切なリソース名規則の使用
+4. パラメータ化と再利用性の考慮
+5. 最新のAPIバージョンの使用
+
+生成するBicepコードのみを返してください。説明は不要です。`
+    },
+    {
+      role: "user", 
+      content: `要件: ${requirements}`
+    }
+  ]
+
+  const response = await fetch(`${endpoint}/openai/deployments/${deployment}/chat/completions?api-version=2024-02-01`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'api-key': apiKey
+    },
+    body: JSON.stringify({
+      messages,
+      max_tokens: 4000,
+      temperature: 0.3
+    })
+  })
+
+  if (!response.ok) {
+    throw new Error(`初期Bicep生成失敗: ${response.status}`)
+  }
+
+  const data = await response.json()
+  return data.choices[0].message.content
+}
+
+async function generateArchitecture(requirements: string, endpoint: string, apiKey: string, deployment: string) {
+  const messages = [
+    {
+      role: "system",
+      content: `あなたはAzureアーキテクチャの専門家です。与えられた要件に基づいて、Mermaid形式のアーキテクチャ図を生成してください。
+
+出力形式:
+- Mermaid flowchart syntax を使用
+- Azureサービス間の関係を明確に表現
+- 適切なラベルと接続線の使用
+- 読みやすいレイアウト
+
+Mermaidコードのみを返してください。説明は不要です。`
+    },
+    {
+      role: "user", 
+      content: `要件: ${requirements}`
+    }
+  ]
+
+  const response = await fetch(`${endpoint}/openai/deployments/${deployment}/chat/completions?api-version=2024-02-01`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'api-key': apiKey
+    },
+    body: JSON.stringify({
+      messages,
+      max_tokens: 2000,
+      temperature: 0.3
+    })
+  })
+
+  if (!response.ok) {
+    throw new Error(`アーキテクチャ生成失敗: ${response.status}`)
+  }
+
+  const data = await response.json()
+  return data.choices[0].message.content
+}
+
+async function evaluateWithAgent(bicep: string, architecture: string, agentPrompt: string, endpoint: string, apiKey: string, deployment: string, agentName: string) {
   const maxRetries = 3
-  
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+  let retryCount = 0
+
+  while (retryCount < maxRetries) {
     try {
-      const response = await fetch(`${endpoint}/openai/deployments/${deployment}/chat/completions?api-version=2024-08-01-preview`, {
+      const messages = [
+        {
+          role: "system",
+          content: agentPrompt
+        },
+        {
+          role: "user", 
+          content: `以下のBicepテンプレートとアーキテクチャを評価してください。
+
+Bicepテンプレート:
+${bicep}
+
+アーキテクチャ:
+${architecture}
+
+JSON形式で以下の構造で回答してください:
+{
+  "score": <0-25の数値>,
+  "issues": [
+    {
+      "category": "<問題のカテゴリ>",
+      "severity": "<high/medium/low>",
+      "description": "<問題の説明>",
+      "improvement": "<具体的な改善提案>"
+    }
+  ]
+}`
+        }
+      ]
+
+      const response = await fetch(`${endpoint}/openai/deployments/${deployment}/chat/completions?api-version=2024-02-01`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'api-key': apiKey,
+          'api-key': apiKey
         },
         body: JSON.stringify({
-          messages: [
-            { role: 'system', content: prompt },
-            {
-              role: 'user',
-              content: `以下を評価してください：
-
-## Bicepテンプレート
-${bicep}
-
-## アーキテクチャ説明
-${architecture || 'なし'}`
-            }
-          ],
+          messages,
           max_tokens: 2000,
-          temperature: 0.2,
-        }),
+          temperature: 0.1
+        })
       })
 
       if (!response.ok) {
-        const errorText = await response.text()
-        
-        // レート制限エラーの場合は長めに待機
         if (response.status === 429) {
-          console.warn(`${agentName} レート制限エラー (試行 ${attempt}/${maxRetries}), 30秒待機中...`)
-          if (attempt < maxRetries) {
-            await new Promise(resolve => setTimeout(resolve, 30000))
-            continue
-          }
+          retryCount++
+          console.log(`${agentName} レート制限エラー (試行 ${retryCount}/${maxRetries}), 30秒待機中...`)
+          await new Promise(resolve => setTimeout(resolve, 30000))
+          continue
         }
-        
-        console.error(`${agentName} API エラー (${response.status}):`, errorText)
-        
-        // フォールバック評価を返す
-        return {
-          score: 15,
-          issues: [{ category: "API エラー", description: `${agentName}評価でAPI呼び出しが失敗しました`, severity: "medium", improvement: "評価システムの調整が必要です" }],
-          strengths: ["基本構成は適切"]
-        }
+        throw new Error(`${agentName}エージェント評価失敗: ${response.status}`)
       }
 
       const data = await response.json()
-      const responseText = data.choices?.[0]?.message?.content || '{}'
+      const content = data.choices[0].message.content
       
+      // ```json で囲まれた形式を処理
+      const jsonContent = extractJsonFromContent(content)
+      
+      let result
       try {
-        const jsonMatch = responseText.match(/```json\s*([\s\S]*?)\s*```/) || [null, responseText]
-        return JSON.parse(jsonMatch[1])
-      } catch {
+        result = JSON.parse(jsonContent)
+      } catch (parseError) {
+        console.error(`${agentName} JSON解析エラー:`, parseError)
+        console.error(`受信したコンテンツ:`, content)
+        
+        // フォールバック: デフォルト値を返す
         return {
-          score: 15,
-          issues: [{ category: "評価エラー", description: "評価結果の解析に失敗", severity: "medium", improvement: "システム調整が必要" }],
-          strengths: ["基本構成は適切"]
+          score: 0,
+          issues: [{
+            category: "JSON解析エラー",
+            severity: "high",
+            description: "AIからの応答をJSON形式で解析できませんでした",
+            improvement: "API応答形式を確認してください"
+          }]
         }
       }
-    } catch {
-      if (attempt >= maxRetries) {
-        return {
-          score: 15,
-          issues: [{ category: "システムエラー", description: `${agentName}評価でエラー発生`, severity: "medium", improvement: "システム確認が必要" }],
-          strengths: ["基本構成は適切"]
-        }
+      
+      return {
+        score: Math.min(Math.max(result.score || 0, 0), 25),
+        issues: result.issues || []
       }
+    } catch (error) {
+      retryCount++
+      if (retryCount >= maxRetries) {
+        console.error(`${agentName}エージェント最大試行回数到達:`, error)
+        return { score: 0, issues: [] }
+      }
+      console.log(`${agentName}エージェントエラー、再試行中... (${retryCount}/${maxRetries})`)
+      await new Promise(resolve => setTimeout(resolve, 10000))
     }
   }
+
+  return { score: 0, issues: [] }
 }
 
-async function improveBicep(currentBicep: string, improvements: string, endpoint: string, apiKey: string, deployment: string): Promise<string> {
-  try {
-    const response = await fetch(`${endpoint}/openai/deployments/${deployment}/chat/completions?api-version=2024-08-01-preview`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'api-key': apiKey,
-      },
-      body: JSON.stringify({
-        messages: [
-          {
-            role: 'system',
-            content: `以下の改善提案を基に、Bicepテンプレートを修正してください：
+async function improveBicep(currentBicep: string, improvements: string, endpoint: string, apiKey: string, deployment: string) {
+  const messages = [
+    {
+      role: "system",
+      content: `あなたはAzure Bicepの専門家です。提供されたBicepテンプレートを指定された改善提案に基づいて改良してください。
 
-## 改善提案
-${improvements}
+重要なガイドライン:
+1. 既存の機能を維持しながら改善を適用
+2. Azure Well-Architected Framework に準拠
+3. 最新のAPIバージョンとベストプラクティスを使用
+4. 改善されたBicepコードのみを返してください
 
-## 現在のBicepテンプレート
+改善されたBicepコードのみを返してください。説明は不要です。`
+    },
+    {
+      role: "user", 
+      content: `現在のBicepテンプレート:
 ${currentBicep}
 
-修正されたBicepテンプレートのみを返してください。`
-          },
-          { role: 'user', content: '改善されたBicepテンプレートを生成してください。' }
-        ],
-        max_tokens: 3000,
-        temperature: 0.2,
-      }),
-    })
-
-    const data = await response.json()
-    return data.choices?.[0]?.message?.content || currentBicep
-  } catch {
-    return currentBicep
-  }
-}
-
-async function generateMermaidFromBicep(bicep: string, endpoint: string, apiKey: string, deployment: string): Promise<string> {
-  try {
-    const response = await fetch(`${endpoint}/openai/deployments/${deployment}/chat/completions?api-version=2024-08-01-preview`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'api-key': apiKey,
-      },
-      body: JSON.stringify({
-        messages: [
-          {
-            role: 'system',
-            content: 'あなたはMermaid図の専門家です。Bicepテンプレートからアーキテクチャ図を生成してください。'
-          },
-          {
-            role: 'user',
-            content: `以下のBicepテンプレートからMermaid形式のアーキテクチャ図を生成してください：\n\n${bicep}`
-          }
-        ],
-        max_tokens: 1500,
-        temperature: 0.2,
-      }),
-    })
-
-    const data = await response.json()
-    return data.choices?.[0]?.message?.content || 'flowchart TD\n    A[アーキテクチャ図生成エラー]'
-  } catch {
-    return 'flowchart TD\n    A[アーキテクチャ図生成エラー]'
-  }
-}
-
-function getSecurityPrompt(): string {
-  return `あなたはAzureセキュリティ専門の評価エージェントです。
-
-## 🛡️ セキュリティ評価基準 (25点満点)
-
-### ネットワークセキュリティ (8点)
-- Private Endpoint使用 (3点)
-- NSG/ASGによる最小権限 (2点)  
-- VNet分離・サブネット設計 (2点)
-- パブリックアクセス無効化 (1点)
-
-### アクセス制御 (8点)
-- マネージドID使用 (3点)
-- RBAC適切な設定 (2点)
-- Key Vault統合 (2点)
-- 認証・認可の実装 (1点)
-
-### データ保護 (6点)
-- 保存時暗号化 (2点)
-- 転送時暗号化 (2点)
-- 機密情報の適切な管理 (2点)
-
-### コンプライアンス (3点)
-- 診断ログ設定 (2点)
-- ポリシー準拠 (1点)
-
-評価は以下のJSON形式で返してください：
-{
-  "score": 評価点数(0-25),
-  "issues": [
-    {
-      "category": "該当カテゴリ",
-      "description": "具体的な問題点",
-      "severity": "high|medium|low",
-      "improvement": "改善提案"
+改善提案:
+${improvements}`
     }
-  ],
-  "strengths": ["良い点1", "良い点2"]
-}`
+  ]
+
+  const response = await fetch(`${endpoint}/openai/deployments/${deployment}/chat/completions?api-version=2024-02-01`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'api-key': apiKey
+    },
+    body: JSON.stringify({
+      messages,
+      max_tokens: 4000,
+      temperature: 0.2
+    })
+  })
+
+  if (!response.ok) {
+    throw new Error(`Bicep改善失敗: ${response.status}`)
+  }
+
+  const data = await response.json()
+  return data.choices[0].message.content
+}
+
+async function generateMermaidFromBicep(bicep: string, endpoint: string, apiKey: string, deployment: string) {
+  const messages = [
+    {
+      role: "system",
+      content: `あなたはAzureアーキテクチャの専門家です。提供されたBicepテンプレートを分析し、Mermaid形式のアーキテクチャ図を生成してください。
+
+出力形式:
+- Mermaid flowchart syntax を使用
+- Bicepで定義されたリソース間の関係を正確に表現
+- 適切なラベルと接続線の使用
+- 読みやすいレイアウト
+
+Mermaidコードのみを返してください。説明は不要です。`
+    },
+    {
+      role: "user", 
+      content: `Bicepテンプレート:
+${bicep}`
+    }
+  ]
+
+  const response = await fetch(`${endpoint}/openai/deployments/${deployment}/chat/completions?api-version=2024-02-01`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'api-key': apiKey
+    },
+    body: JSON.stringify({
+      messages,
+      max_tokens: 2000,
+      temperature: 0.3
+    })
+  })
+
+  if (!response.ok) {
+    throw new Error(`Mermaid生成失敗: ${response.status}`)
+  }
+
+  const data = await response.json()
+  return data.choices[0].message.content
+}
+
+// エージェントプロンプト関数群
+function getSecurityPrompt(): string {
+  return `あなたはAzureセキュリティの専門家です。Azure Well-Architected Framework のセキュリティピラーに基づいて、Bicepテンプレートとアーキテクチャを厳格に評価してください。
+
+評価観点:
+- Identity and Access Management (IAM)
+- ネットワークセキュリティ
+- データ保護と暗号化
+- アプリケーションセキュリティ
+- インフラセキュリティ
+- DevSecOps
+
+25点満点で評価し、具体的な改善提案を含めてください。`
 }
 
 function getPerformancePrompt(): string {
-  return `あなたはAzureパフォーマンス専門の評価エージェントです。
+  return `あなたはAzureパフォーマンス最適化の専門家です。Azure Well-Architected Framework のパフォーマンス効率ピラーに基づいて、Bicepテンプレートとアーキテクチャを評価してください。
 
-## ⚡ パフォーマンス評価基準 (25点満点)
+評価観点:
+- リソースのスケーラビリティ
+- 応答性とスループット
+- リソース効率性
+- モニタリングと診断
+- 自動スケーリング設定
+- 地理的分散
 
-### スケーラビリティ (10点)
-- オートスケール設定 (4点)
-- 負荷分散の実装 (3点)
-- 水平スケール対応 (3点)
-
-### レスポンス最適化 (8点)
-- CDN/Front Door使用 (3点)
-- キャッシュ戦略 (3点)
-- 静的コンテンツ最適化 (2点)
-
-### リソース効率 (4点)
-- 適切なSKU選択 (2点)
-- 配置最適化 (2点)
-
-### モニタリング (3点)
-- Application Insights (2点)
-- パフォーマンスアラート (1点)
-
-評価は以下のJSON形式で返してください：
-{
-  "score": 評価点数(0-25),
-  "issues": [
-    {
-      "category": "該当カテゴリ",
-      "description": "具体的な問題点",
-      "severity": "high|medium|low",
-      "improvement": "改善提案"
-    }
-  ],
-  "strengths": ["良い点1", "良い点2"]
-}`
+25点満点で評価し、具体的な改善提案を含めてください。`
 }
 
 function getReliabilityPrompt(): string {
-  return `あなたはAzure信頼性専門の評価エージェントです。
+  return `あなたはAzure信頼性の専門家です。Azure Well-Architected Framework の信頼性ピラーに基づいて、Bicepテンプレートとアーキテクチャを評価してください。
 
-## 🔧 信頼性評価基準 (25点満点)
+評価観点:
+- 高可用性設計
+- 障害復旧能力
+- データバックアップ戦略
+- 冗長性とフェイルオーバー
+- 監視とアラート
+- SLA要件への準拠
 
-### 高可用性 (10点)
-- 可用性ゾーン使用 (4点)
-- 冗長構成 (3点)
-- 単一障害点排除 (3点)
-
-### 災害復旧 (8点)
-- 地理的冗長 (4点)
-- バックアップ戦略 (2点)
-- 復旧手順 (2点)
-
-### モニタリング (4点)
-- 包括的監視 (2点)
-- ログ収集 (2点)
-
-### 運用安定性 (3点)
-- 段階的デプロイ (2点)
-- ロールバック機能 (1点)
-
-評価は以下のJSON形式で返してください：
-{
-  "score": 評価点数(0-25),
-  "issues": [
-    {
-      "category": "該当カテゴリ",
-      "description": "具体的な問題点",
-      "severity": "high|medium|low",
-      "improvement": "改善提案"
-    }
-  ],
-  "strengths": ["良い点1", "良い点2"]
-}`
+25点満点で評価し、具体的な改善提案を含めてください。`
 }
 
 function getCostPrompt(): string {
-  return `あなたはAzureコスト最適化専門の評価エージェントです。
+  return `あなたはAzureコスト最適化の専門家です。Azure Well-Architected Framework のコスト最適化ピラーに基づいて、Bicepテンプレートとアーキテクチャを評価してください。
 
-## 💰 コスト最適化評価基準 (25点満点)
+評価観点:
+- リソースサイジングの適切性
+- 予約インスタンスの活用
+- 自動スケーリングによるコスト効率
+- 不要なリソースの特定
+- コスト監視と予算管理
+- ライセンス最適化
 
-### リソース最適化 (10点)
-- 適切なSKU選択 (4点)
-- 未使用リソース排除 (3点)
-- リソースサイズ最適化 (3点)
+25点満点で評価し、具体的な改善提案を含めてください。`
+}
 
-### スケール効率 (8点)
-- オートスケール活用 (4点)
-- 予約インスタンス (2点)
-- スポットインスタンス (2点)
-
-### モニタリング制御 (4点)
-- コスト監視 (2点)
-- 予算アラート (2点)
-
-### 設計効率 (3点)
-- サーバーレス活用 (2点)
-- 共有リソース使用 (1点)
-
-評価は以下のJSON形式で返してください：
-{
-  "score": 評価点数(0-25),
-  "issues": [
-    {
-      "category": "該当カテゴリ",
-      "description": "具体的な問題点",
-      "severity": "high|medium|low",
-      "improvement": "改善提案"
+// JSON抽出用ヘルパー関数
+function extractJsonFromContent(content: string): string {
+  try {
+    // ```json で囲まれている場合の処理
+    const jsonMatch = content.match(/```json\s*([\s\S]*?)\s*```/)
+    if (jsonMatch) {
+      return jsonMatch[1].trim()
     }
-  ],
-  "strengths": ["良い点1", "良い点2"]
-}`
+    
+    // ``` で囲まれている場合の処理
+    const codeMatch = content.match(/```\s*([\s\S]*?)\s*```/)
+    if (codeMatch) {
+      return codeMatch[1].trim()
+    }
+    
+    // そのまま返す
+    return content.trim()
+  } catch (error) {
+    console.error('JSON抽出エラー:', error)
+    return content
+  }
+}
+
+// 統合改善エージェント（MVP A+B）
+async function integratedImprovementAgent(
+  bicep: string,
+  architecture: string,
+  evaluationResults: any[],
+  endpoint: string,
+  apiKey: string,
+  deployment: string
+) {
+  try {
+    // 優先度重み（Security ≥ Reliability ≥ Performance ≥ Cost）
+    const weights = {
+      security: 0.4,
+      reliability: 0.3,
+      performance: 0.2,
+      cost: 0.1
+    }
+
+    // 正規化されたスコア計算（0-1スケール）
+    const normalizedScores = evaluationResults.reduce((acc, result) => {
+      const agentKey = result.agent === 'セキュリティ' ? 'security' :
+                      result.agent === '信頼性' ? 'reliability' :
+                      result.agent === 'パフォーマンス' ? 'performance' : 'cost'
+      acc[agentKey] = result.score / 25 // 25点満点を1.0に正規化
+      return acc
+    }, {} as any)
+
+    // 目的関数 J = Σ(w_i * S_i) - λ * penalties
+    const currentObjective = Object.keys(weights).reduce((sum, key) => {
+      return sum + weights[key as keyof typeof weights] * normalizedScores[key]
+    }, 0)
+
+    console.log(`📊 現在の目的関数値: ${currentObjective.toFixed(3)}`)
+
+    // 全エージェントの課題を統合
+    const allIssues = evaluationResults.flatMap(result => 
+      result.issues.map((issue: any) => ({
+        ...issue,
+        agent: result.agent,
+        priority: weights[
+          result.agent === 'セキュリティ' ? 'security' :
+          result.agent === '信頼性' ? 'reliability' :
+          result.agent === 'パフォーマンス' ? 'performance' : 'cost'
+        ]
+      }))
+    )
+
+    // 重要度でソート（優先度 × 深刻度）
+    const prioritizedIssues = allIssues
+      .filter(issue => issue.severity === 'high' || issue.severity === 'medium')
+      .sort((a, b) => {
+        const scoreA = a.priority * (a.severity === 'high' ? 1.0 : 0.6)
+        const scoreB = b.priority * (b.severity === 'high' ? 1.0 : 0.6)
+        return scoreB - scoreA
+      })
+      .slice(0, 5) // 上位5つの課題に集中
+
+    if (prioritizedIssues.length === 0) {
+      return {
+        improvedBicep: null,
+        summary: "重要な改善課題は検出されませんでした。現在のBicepテンプレートは適切に設計されています。",
+        appliedImprovements: [],
+        objectiveImprovement: 0
+      }
+    }
+
+    // 統合改善プロンプトの生成
+    const improvementPrompt = `あなたはAzure Well-Architected Framework の専門家です。以下の評価結果とBicepテンプレートを分析し、全体最適化の観点で改善してください。
+
+優先度順序: Security → Reliability → Performance → Cost
+
+重要な改善課題（優先度順）:
+${prioritizedIssues.map((issue, index) => 
+`${index + 1}. [${issue.agent}] ${issue.description}
+   改善案: ${issue.improvement || '具体的な改善方法を提案してください'}
+   重要度: ${issue.severity}`
+).join('\n')}
+
+制約事項:
+- 上位優先度の改善は下位優先度を大幅に悪化させてはいけません
+- セキュリティの基本要件（暗号化、Private Endpoint等）は必須
+- コスト最適化はセキュリティ・信頼性を犠牲にしてはいけません
+
+現在のBicepテンプレート:
+${bicep}
+
+改善されたBicepテンプレートのみを返してください。説明は不要です。`
+
+    // Azure OpenAI API呼び出し
+    const response = await fetch(`${endpoint}/openai/deployments/${deployment}/chat/completions?api-version=2024-02-01`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'api-key': apiKey
+      },
+      body: JSON.stringify({
+        messages: [
+          {
+            role: "system",
+            content: improvementPrompt
+          },
+          {
+            role: "user",
+            content: `統合改善を実行してください。優先度と制約を厳守してください。`
+          }
+        ],
+        max_tokens: 4000,
+        temperature: 0.2
+      })
+    })
+
+    if (!response.ok) {
+      if (response.status === 429) {
+        console.log('統合改善エージェント レート制限エラー、30秒待機中...')
+        await new Promise(resolve => setTimeout(resolve, 30000))
+        return integratedImprovementAgent(bicep, architecture, evaluationResults, endpoint, apiKey, deployment)
+      }
+      throw new Error(`統合改善エージェント失敗: ${response.status}`)
+    }
+
+    const data = await response.json()
+    const improvedBicep = data.choices[0].message.content
+
+    return {
+      improvedBicep,
+      summary: `統合改善エージェントが ${prioritizedIssues.length} 件の重要課題を分析し、全体最適化を実行しました。`,
+      appliedImprovements: prioritizedIssues,
+      objectiveImprovement: "改善後の目的関数値は再評価で計算されます"
+    }
+
+  } catch (error) {
+    console.error('統合改善エージェントエラー:', error)
+    return {
+      improvedBicep: null,
+      summary: "統合改善エージェントでエラーが発生しました。元のBicepテンプレートを使用します。",
+      appliedImprovements: [],
+      objectiveImprovement: 0,
+      error: error instanceof Error ? error.message : '不明なエラー'
+    }
+  }
+}
+
+// 最終スコア計算関数
+async function calculateFinalScore(bicep: string, architecture: string, endpoint: string, apiKey: string, deployment: string) {
+  try {
+    console.log('📊 改善後の4エージェント評価中...')
+    
+    // セキュリティ評価
+    const securityEval = await evaluateWithAgent(bicep, architecture, getSecurityPrompt(), endpoint, apiKey, deployment, "セキュリティ")
+    await new Promise(resolve => setTimeout(resolve, 10000))
+    
+    // パフォーマンス評価
+    const performanceEval = await evaluateWithAgent(bicep, architecture, getPerformancePrompt(), endpoint, apiKey, deployment, "パフォーマンス")
+    await new Promise(resolve => setTimeout(resolve, 10000))
+    
+    // 信頼性評価
+    const reliabilityEval = await evaluateWithAgent(bicep, architecture, getReliabilityPrompt(), endpoint, apiKey, deployment, "信頼性")
+    await new Promise(resolve => setTimeout(resolve, 10000))
+    
+    // コスト最適化評価
+    const costEval = await evaluateWithAgent(bicep, architecture, getCostPrompt(), endpoint, apiKey, deployment, "コスト最適化")
+
+    return {
+      security: securityEval.score,
+      performance: performanceEval.score,
+      reliability: reliabilityEval.score,
+      cost: costEval.score,
+      total: securityEval.score + performanceEval.score + reliabilityEval.score + costEval.score
+    }
+  } catch (error) {
+    console.error('最終スコア計算エラー:', error)
+    // エラー時は改善前スコアをそのまま返す
+    throw error
+  }
 }
